@@ -1,0 +1,571 @@
+---
+title: "Assignment 1"
+author: "Kimberly Juarez-Rico"
+date: "9/18/2020"
+output: html_document
+---
+
+The following assignment demonstrates how to read and manipulate energy
+data files in order to create bar plots and geospatial maps.
+
+PGE puts out Excel files of energy use data for each quarter that anyone
+can download and analyze. I downloaded the 2017 - 2020 data from their site
+(with 2020 only having Q1 and Q2 so far). 
+
+I then restricted zip codes to the Bay Area in order to analyze
+energy usage in the Bay Area from 2017 to 2020 and changes in residential
+electric energy use after the pandemic began in Q2 of 2020. 
+
+Part 1: This part of the assignment creates a bar plot of residential and
+commercial electric and gas energy data for Bay Area zip codes from
+quarter 1 of 2017 to quarter 2 of 2020. At the time of analysis, data from
+quarters 3 and 4 of 2020 were not yet available so they were not included,
+but could potentially be in the future. 
+
+
+
+```{r setup, include = F}
+knitr::opts_chunk$set(warning = F, message = F, echo = F, eval = T)
+```
+
+This imports the libraries needed:
+
+```{r}
+library(tidyverse)
+library(sf)
+library(tigris)
+library(leaflet)
+library(plotly)
+library(gtools)
+library(dplyr)
+```
+
+Creates a data set for all of the electricity use data from Q1 2017 to Q2
+2020:
+
+```{r}
+pge_elec <- NULL
+years <- 2017:2020
+quarters <- 1:4
+type <- "Electric"
+
+for (year in years){
+  for(quarter in quarters) {
+      
+  if ( (year == 2020) & ((quarter == 3) | (quarter == 4))){
+    next
+  }
+  
+  filename <- 
+    paste0(
+      "PGE_",
+      year,
+      "_Q",
+      quarter,
+      "_",
+      type,
+      "UsageByZip.csv"
+    )
+  print(filename)
+  
+  temp <- read_csv(filename)
+  
+ pge_elec <- rbind(pge_elec, temp)
+  }
+}
+```
+
+Filters the electricity data so that the data frame only contains total
+energy usage and converts the energy data values from kWh to kBTU.
+The energy is converted to kBTU so that it can also be compared with gas
+data which is usually in therms. Therms will also be converted to kBTU:
+
+```{r}
+elec_change <-
+  pge_elec %>% 
+  filter(
+    CUSTOMERCLASS %in% 
+      c(
+        "Elec- Residential",
+        "Elec- Commercial"
+      )
+  )%>% 
+  select(
+    !c(COMBINED, AVERAGEKWH,TOTALCUSTOMERS)
+  ) %>% 
+  group_by(MONTH, CUSTOMERCLASS) %>% 
+   mutate (
+    TOTALKBTU =
+      TOTALKWH * 3412.14
+    )%>%
+   select(!TOTALKWH)
+
+elec_change
+```
+
+This creates a data set for all of the gas use data from Q1 2017 to Q2
+2020:
+
+```{r}
+pge_gas <- NULL
+years <- 2017:2020
+quarters <- 1:4
+type <- "Gas"
+
+for (year in years){
+  for(quarter in quarters) {
+      
+  if ( (year == 2020) & ((quarter == 3) | (quarter == 4))){
+    next
+  }
+  
+  filename <- 
+    paste0(
+      "PGE_",
+      year,
+      "_Q",
+      quarter,
+      "_",
+      type,
+      "UsageByZip.csv"
+    )
+  print(filename)
+  temp <- read_csv(filename)
+  
+ pge_gas <- rbind(pge_gas, temp)
+  }
+}
+```
+
+This filters the gas data so that the data frame only contains total
+energy usage and converts from therms to kBTU:
+
+```{r}
+gas_change <-
+  pge_gas %>% 
+  filter(
+    CUSTOMERCLASS %in% 
+      c(
+        "Gas- Residential",
+        "Gas- Commercial"
+      )
+  )%>% 
+  select(
+    !c(COMBINED, AVERAGETHM,TOTALCUSTOMERS)
+  ) %>% 
+  group_by(MONTH, CUSTOMERCLASS) %>% 
+   mutate (
+    TOTALKBTU =
+      TOTALTHM * 99976.1
+    )%>%
+   select(!TOTALTHM)
+
+gas_change
+```
+
+This binds the total electricity use and gas use data into a dataframe that will
+then be plotted: 
+
+```{r}
+pge_elec_gas <- NULL
+  pge_elec_gas <- rbind(pge_elec_gas, elec_change, gas_change)
+```
+
+This filters out zip code data for the Bay Area:
+
+```{r}
+usa_zips <- 
+  zctas(cb = T, progress_bar = F)
+
+ca_counties <- counties("CA", cb = T, progress_bar = F)
+
+bay_county_names <-
+  c(
+    "Alameda",
+    "Contra Costa",
+    "Marin",
+    "Napa",
+    "San Francisco",
+    "San Mateo",
+    "Santa Clara",
+    "Solano",
+    "Sonoma"
+  )
+
+bay_counties <-
+  ca_counties %>%
+  filter(NAME %in% bay_county_names)
+
+bay_zips <-
+  usa_zips %>% 
+  st_centroid() %>% 
+  .[bay_counties, ] %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(usa_zips %>% select(GEOID10)) %>% 
+  st_as_sf()
+
+pge_elec_gas_bay <-
+  pge_elec_gas %>% 
+  filter(CUSTOMERCLASS %in% 
+      c(
+        "Elec- Residential",
+        "Elec- Commercial",
+        "Gas- Residential",
+        "Gas- Commercial"
+      )
+  ) %>% 
+  mutate(
+    ZIPCODE = ZIPCODE %>% as.character()
+  ) %>% 
+  group_by(ZIPCODE, MONTH, YEAR, CUSTOMERCLASS) %>% 
+  summarize(
+    TOTALKBTU = sum(TOTALKBTU, na.rm =T)
+  ) %>%
+  right_join(
+    bay_zips %>% select(GEOID10),
+    by = c("ZIPCODE" = "GEOID10")
+  ) %>% 
+  st_as_sf() %>% 
+  st_transform(4326)%>%
+  select(!geometry)
+
+pge_elec_gas_bay
+```
+
+Filters the energy data of the Bay Area to just the factors needed 
+for the analysis: year, month, and customerclass:
+
+```{r}
+pge_total <-
+  pge_elec_gas_bay %>% 
+  filter(
+    CUSTOMERCLASS %in% 
+      c(
+        "Elec- Residential",
+        "Elec- Commercial",
+        "Gas- Residential",
+        "Gas- Commercial"
+      )
+  ) %>% 
+  group_by(YEAR,MONTH,CUSTOMERCLASS) %>% 
+  summarize(
+    TOTALKBTU = 
+      sum(
+        TOTALKBTU, 
+        na.rm = T
+      )
+  )
+
+pge_total
+```
+
+Combines YEAR and MONTH into one column so that the information is more
+clearly summarized in the plot:
+
+```{r}
+  pge_total$dates <-
+  paste0(pge_total$YEAR, "-", pge_total$MONTH)
+```
+
+Further filters the energy data into date and month, customer class, and total
+kBTU:
+
+```{r}
+pge_final <-
+  pge_total %>% 
+  select(dates,CUSTOMERCLASS,TOTALKBTU)
+
+pge_final
+```
+
+This creates a plot of the data:
+
+```{r}
+pge_chart <-
+  pge_final%>%
+  ggplot() +
+  geom_bar(
+    aes(
+      x = dates %>% factor(),
+      y = TOTALKBTU,
+      fill = CUSTOMERCLASS
+    ),
+    stat = "identity",
+    position = "stack"
+  ) +
+  labs(
+    x = "Year, Month",
+    y = "kBTU",
+    title = "PG&E Territory Monthly Energy Usage",
+    fill = "Type"
+  )+ 
+  theme(axis.text.x=element_text(angle=50, size=5, vjust=0.5))
+
+pge_chart
+
+pge_chart %>% ggplotly()
+```
+
+Part 2: This part of the assignment analyzes residential energy usage
+for Bay Area block groups before and after the pandemic began. The pandemic
+technically began in quarter 1 of 2020, but quarter 2 of 2020 are where the
+changes more most likely seen because shelter-in-place began late in
+quarter 1 of 2020. Therefore, comparing the same quarter from the year before,
+quarter 2 of 2019 to quarter 2 of 2020 would most likely show a difference
+in residential electric energy usage. Comparing the same quarter but in 
+different years can also help decrease the chance that changes in residential
+electric energy usage are not just due to changes of the seasons.
+
+Imports the CSV file of Q2 2019, before pandemic began:
+
+```{r}
+pge_19_Q2_elec <- read_csv("PGE_2019_Q2_ElectricUsageByZip.csv")
+  pge_19_Q2_elec <- rbind(pge_19_Q2_elec) 
+```
+
+Filters out the residential electricity data and converts to kBTU:
+
+```{r}
+pge_19_Q2_elec_filters <-
+  pge_19_Q2_elec %>%
+  filter(
+    CUSTOMERCLASS %in% 
+      ("Elec- Residential")
+  )%>% 
+  select(
+    !c(COMBINED)
+  ) %>% 
+  group_by(ZIPCODE, MONTH) %>%
+   mutate (
+     AVERAGEKWH =
+      TOTALKWH/TOTALCUSTOMERS,
+     na.rm = T,
+     
+    AVERAGEKBTU_19 =
+      AVERAGEKWH * 3412.14
+   )%>%
+  group_by(ZIPCODE) %>% 
+  summarise(AVERAGEKBTU_19 = sum(AVERAGEKBTU_19))
+
+pge_19_Q2_elec_filters
+  
+```
+
+Imports the CSV file of Q2 2020, after the pandemic began:
+
+```{r}
+pge_20_Q2_elec <- read_csv("PGE_2020_Q2_ElectricUsageByZip.csv")
+  pge_20_Q2_elec <- rbind(pge_20_Q2_elec) 
+```
+
+Filters out the residential electricity data and converts to kBTU:
+
+```{r}
+pge_20_Q2_elec_filters <-
+  pge_20_Q2_elec %>%
+  filter(
+    CUSTOMERCLASS %in% 
+      ("Elec- Residential")
+  )%>% 
+  select(
+    !c(COMBINED)
+  ) %>% 
+  group_by(ZIPCODE, MONTH) %>%
+   mutate (
+     AVERAGEKWH =
+      TOTALKWH/TOTALCUSTOMERS,
+     
+    AVERAGEKBTU_20 =
+      AVERAGEKWH * 3412.14
+   )%>%
+  group_by(ZIPCODE) %>% 
+  summarise(AVERAGEKBTU_20 = sum(AVERAGEKBTU_20))
+
+pge_20_Q2_elec_filters
+```
+
+Filters the data so that only energy data of Bay Area block groups is 
+included:
+
+```{r}
+usa_zips <- 
+  zctas(cb = T, progress_bar = F)
+
+bay_zips <-
+  usa_zips %>% 
+  st_centroid() %>% 
+  .[bay_counties, ] %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(usa_zips %>% select(GEOID10)) %>% 
+  st_as_sf()
+
+bay_cbgs <- block_groups("CA", bay_county_names[1:9], cb = T, progress_bar = F)
+
+bay_cbgs <- 
+  bay_county_names %>% 
+  map_dfr(function(county) {
+    block_groups("CA", county, cb = T, progress_bar = F)
+  })
+
+pge_19_Q2_elec_final <-
+  pge_19_Q2_elec_filters %>% 
+  mutate(
+    ZIPCODE = ZIPCODE %>% as.character()
+  ) %>% 
+  right_join(
+    bay_zips %>% select(GEOID10),
+    by = c("ZIPCODE" = "GEOID10")
+  ) %>% 
+  st_as_sf() %>% 
+  st_transform(4326)
+
+pge_20_Q2_elec_final <-
+  pge_20_Q2_elec_filters %>% 
+  mutate(
+    ZIPCODE = ZIPCODE %>% as.character()
+  ) %>% 
+  right_join(
+    bay_zips %>% select(GEOID10),
+    by = c("ZIPCODE" = "GEOID10")
+  ) %>% 
+  st_as_sf() %>% 
+  st_transform(4326)
+```
+
+Creates a data frame that has energy data for the second quarter of 2020
+```{r}
+pge_Q2_19_20 <-
+  pge_19_Q2_elec_final%>%
+  st_join(
+    pge_20_Q2_elec_final %>% select(AVERAGEKBTU_20),
+    by = c("AVERAGEKBTU_TOTAL" = "AVERAGEKBTU_20")
+  )
+
+pge_Q2_19_20
+```
+
+Creates a new column that takes the difference in values of kBTU
+energy usage of quater 2 of 2020 from quarter 2 of 2020. This is possible 
+because the same zip codes are used for both columns of data:
+
+```{r}
+pge_Q2_19_20$AVERAGEKBTU_Diff <-
+  (pge_Q2_19_20$AVERAGEKBTU_20 - pge_Q2_19_20$AVERAGEKBTU_19)
+```
+
+Creates an color coded map of energy usage for quarter 2 of 2019. The more 
+intense red color indicates greater residential electric energy usage 
+for that block group:
+
+```{r}
+res_pal <- colorNumeric(
+  palette = "Reds",
+  domain = pge_Q2_19_20$AVERAGEKBTU_19
+)
+
+leaflet() %>% 
+  addTiles() %>% 
+  addPolygons(
+    data = pge_Q2_19_20,
+    fillColor = ~res_pal(AVERAGEKBTU_19),
+    color = "white",
+    opacity = 0.5,
+    fillOpacity = 0.5,
+    weight = 1,
+    label = ~paste0(
+      round(AVERAGEKBTU_19), 
+      " kBTU average in ",
+      ZIPCODE
+    ),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      opacity = 1
+    )
+  ) %>% 
+  addLegend(
+    data = pge_Q2_19_20,
+    pal = res_pal,
+    values = ~AVERAGEKBTU_19,
+    title = "Total Residential<br>kBTU, Q2, 2019"
+  )
+```
+
+Creates an color coded map of energy usage for quarter 2 of 2020. The more 
+intense blue color indicates greater residential electric energy usage 
+for that block group:
+
+```{r}
+res_pal <- colorNumeric(
+  palette = "Blues",
+  domain = pge_Q2_19_20$AVERAGEKBTU_20
+)
+
+leaflet() %>% 
+  addTiles() %>% 
+  addPolygons(
+    data = pge_Q2_19_20,
+    fillColor = ~res_pal(AVERAGEKBTU_20),
+    color = "white",
+    opacity = 0.5,
+    fillOpacity = 0.5,
+    weight = 1,
+    label = ~paste0(
+      round(AVERAGEKBTU_20), 
+      " kBTU average in ",
+      ZIPCODE
+    ),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      opacity = 1
+    )
+  ) %>% 
+  addLegend(
+    data = pge_Q2_19_20,
+    pal = res_pal,
+    values = ~AVERAGEKBTU_20,
+    title = "Total Residential<br>kBTU, Q2, 2020"
+  )
+```
+
+Creates an color coded map of the difference in energy usage for block groups. 
+The more intense green color indicates a greater change residential electric 
+energy usage for that block group from quarter 2 of 2019 to quarter 2 of 2020,
+or change from before and after the pandemic:
+```{r}
+res_pal <- colorNumeric(
+  palette = "Greens",
+  domain = pge_Q2_19_20$AVERAGEKBTU_Diff
+)
+
+leaflet() %>% 
+  addTiles() %>% 
+  addPolygons(
+    data = pge_Q2_19_20,
+    fillColor = ~res_pal(AVERAGEKBTU_Diff),
+    color = "white",
+    opacity = 0.5,
+    fillOpacity = 0.5,
+    weight = 1,
+    label = ~paste0(
+      round(AVERAGEKBTU_Diff), 
+      " kBTU average in ",
+      ZIPCODE
+    ),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      opacity = 1
+    )
+  ) %>% 
+  addLegend(
+    data = pge_Q2_19_20,
+    pal = res_pal,
+    values = ~AVERAGEKBTU_Diff,
+    title = "Difference in <br>Total Residential kBTU <br>
+    in Q2 2019 <br> to Q2 2020"
+  )
+```
+
+Sources: 
+https://pge-energydatarequest.com/public_datasets
+https://stanfordfuturebay.github.io/course/introduction.html
+
