@@ -1,0 +1,545 @@
+---
+title: "Assignment 2"
+author: "Kimberly Juarez-Rico"
+date: "9/26/2020"
+output: html_document
+---
+This assignment focused on performing equity analysis by using Census, American 
+Communities Survey (ACS), and Public Use Microdata (PUMS) data. Survey data 
+from censusapi comes in "buckets" or different catergories for grouping 
+together data on a larger scale. For example, the buckets for different income
+levels sometimes range from $30k - $40k. However, PUMS allows for data to be 
+analyzed on a smaller scale at the household or even individual level. For
+this assignment, ACS 5 year and 1 year data and 5 year PUMS were used to 
+analyze different factors that affect education and educational outcomes. 
+
+For this assignment, I chose to focus on Sonoma County when for parts 1 and 3
+that specified that the analysis could focus on just one Bay Area county in
+particular. Part 2 asked for an analysis on the entire Bay Area.
+I chose Sonoma County because I grew up there so I am interested in analyzing 
+the data from this area.
+
+Part 1:
+The first part of the assignment was to create an analysis on educational 
+attainment by race in the county of choice. I used ACS C15002 data which 
+groups together educational attainment by race and sex. I had to use 
+C15002 data because this was one the only data set that included race
+into the analysis of educational attainment. 
+
+First, the necessary packages were installed that would make it easier to 
+use the ACS and Census data:
+
+```{r setup, include = F}
+knitr::opts_chunk$set(warning = F, message = F, echo = T, eval = T, fig.show = T)
+```
+
+```{r}
+library(tidyverse)
+library(sf)
+library(tigris)
+library(leaflet)
+library(censusapi)
+library(tidycensus)
+```
+
+Census data was downloaded onto my computer:
+
+```{r}
+Sys.setenv(CENSUS_KEY="4f290b276a2a5526b13d917c76884e70b99ba725")
+
+acs_vars_2018_5yr <-
+  listCensusMetadata(
+    name = "2018/acs/acs5",
+    type = "variables"
+  )
+
+acs_vars_2018_1yr <-
+  listCensusMetadata(
+    name = "2018/acs/acs1",
+    type = "variables"
+  )
+
+acs_vars_2019_1yr <-
+  listCensusMetadata(
+    name = "2019/acs/acs1",
+    type = "variables"
+  )
+
+saveRDS(acs_vars_2018_5yr, "acs_vars_2018_5yr")
+saveRDS(acs_vars_2018_1yr, "acs_vars_2018_1yr")
+saveRDS(acs_vars_2019_1yr, "acs_vars_2019_1yr")
+```
+
+This chuck creates a data set that calculates the total number of 
+people surveyed for the 15002 data set so that it can then be used to 
+manipulate the data set in C15002. 
+
+```{r}
+soco_education_total <-
+  getCensus(
+    name = "acs/acs5",
+    vintage = 2018,
+    region = "county:097",
+    regionin = "state:06",
+    vars = c("group(B15002)")
+  )%>%
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2018_5yr %>%
+      select(name, label),
+    by = c("variable" = "name")
+  ) %>%
+  select(-variable) %>%
+  separate(
+    label,
+    into = c(NA,NA,"education"),
+    sep = "!!"
+  ) %>%
+   filter(!is.na(education))%>%
+   summarize(
+         total = sum
+          (estimate,
+            na.rm =T)
+   )
+soco_education_total
+```
+
+Specific race labels were created according to the corresponding data group. 
+C15002 is divided by race in that a letter of the alphabet is added to the end
+of the title to distinguish between racial groups:
+
+```{r}
+census_race_labels <- 
+  c(
+    "White Alone",
+    "Black or African American",
+    "American Indian and Alaska Native Alone",
+    "Asian Alone",
+    "Native Hawaiian and Other Pacific Islander Alone",
+    "Some Other Race Alone",
+    "Two or More Races",
+    "White Alone, Not Hispanic or Latino",
+    "Hispanic or Latino"
+  )
+
+soco_education_race <-
+  1:9 %>% 
+  map_dfr(function(x){
+    getCensus(
+      name = "acs/acs5",
+      vintage = 2018,
+      region = "county:097",
+      regionin = "state:06",
+      vars = paste0("group(C15002",LETTERS[x],")")
+    ) %>%
+      select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+      pivot_longer(
+        ends_with("E"),
+        names_to = "variable",
+        values_to = "estimate"
+      ) %>%
+      left_join(
+        acs_vars_2018_1yr %>% 
+          select(name, label), 
+        by = c("variable" = "name")
+      ) %>% 
+      select(-variable) %>% 
+      separate(
+        label,
+        into = c(NA,NA,"sex"),
+        sep = "!!"
+      ) %>% 
+      filter(!is.na(sex)) %>% 
+      mutate(race = census_race_labels[x])%>%
+      mutate(soco_education_total,
+        percentageOfPop = 
+          (estimate / total)*100,
+          na.rm = T
+      )
+  })
+
+soco_education_race
+```
+
+This creates a bar graph of educational attainment by race for people living 
+in Sonoma County over 25 years old:
+
+```{r}
+soco_plot<-
+soco_education_race %>% 
+  group_by(sex, race) %>% 
+  summarize(percentageOfPop = sum(percentageOfPop)) %>% 
+  ggplot() +
+  geom_bar(
+    aes(
+      x = race %>% factor(),
+      y = percentageOfPop,
+      fill = sex
+    ),
+     stat = "identity",
+    position = "stack"
+  ) +
+  labs(
+    x = "Educational Attainment",
+    y = "Percentage of people (over 25)",
+    title = "Sonoma County educational attainment by race",
+    fill = "Gender of person"
+  ) +
+  coord_flip()
+
+soco_plot
+```
+
+The percentage of the population that has the highest percentage of 
+educational attainment are White and White (non-Hispanic). 
+
+Part 2: Estimating the number and percentage of K-12 students that do not 
+have internet access at home using PUMS data. 
+
+Load in the PUMS 2018 data:
+
+```{r}
+census_api_key("4f290b276a2a5526b13d917c76884e70b99ba725")
+
+pums_vars_2018 <- 
+  pums_variables %>%
+  filter(year == 2018, survey == "acs5")
+
+pums_vars_2018_distinct_hh <- 
+  pums_vars_2018 %>%
+  distinct(var_code, var_label, data_type, level) %>% 
+  filter(level == "housing")
+```
+
+Categorize PUMS data so that the only data sets presented are the number of 
+households with or without access to the internet and 
+number of persons under the age of 18 in each household:
+
+```{r}
+ca_pums <- get_pums(
+  variables = c(
+    "PUMA",
+    "ACCESS",
+    "R18"
+  ),
+  state = "CA",
+  year = 2018,
+  survey = "acs5",
+  recode = T
+)
+```
+
+Aggregate the data so that only data from Sonoma County is presented: 
+
+```{r}
+ca_pumas <-
+  pumas("CA", cb = T, progress_bar = F)
+
+soco_name <- "Sonoma"
+
+soco <-
+  counties("CA", cb = T, progress_bar = F) %>%
+  filter(NAME %in% soco_name)
+
+soco_pumas <-
+  ca_pumas %>% 
+  st_centroid() %>% 
+  .[soco, ] %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(ca_pumas %>% select(GEOID10)) %>% 
+  st_as_sf()
+
+soco_pums <-
+  ca_pums %>% 
+  filter(PUMA %in% soco_pumas$PUMACE10)
+```
+
+The final analysis involves finding the total percentage of children who
+do not have access to the internet. "Yes, by paying by cell phone company or 
+Internet service provider" is the label for households that have internet
+access. If a household does not fall under this label and if a person under
+18 lives in this household, then the child is counted as not having access
+to the internet. The final map shows the distribution of children in 
+Sonoma County who do not have access to the internet:
+
+```{r}
+soco_internet <-
+  soco_pums %>% 
+  filter(!duplicated(SERIALNO)) %>% 
+  mutate(
+    child_nointernet = ifelse(
+      (ACCESS_label != "Yes, by
+      paying by cell phone company or Internet service provider") &
+        (R18 != 0),
+      WGTP,
+      0
+    )
+  ) %>% 
+  group_by(PUMA) %>% 
+  summarize(
+    perc_child_nointernet =
+      sum(child_nointernet, na.rm =T)/sum(WGTP, na.rm = T)*100
+  ) %>% 
+  left_join(
+    soco_pumas %>% 
+      select(PUMACE10),
+    by = c("PUMA" = "PUMACE10")
+  ) %>% 
+  st_as_sf()
+
+pums_pal <- colorNumeric(
+  palette = "Blues",
+  domain = soco_internet$perc_child_nointernet
+)
+
+leaflet() %>%
+  addTiles() %>% 
+  addPolygons(
+    data = soco_internet,
+    fillColor = ~pums_pal(perc_child_nointernet),
+    color = "white",
+    opacity = 0.5,
+    fillOpacity = 0.5,
+    weight = 1,
+    label = ~paste0(
+      round(perc_child_nointernet), 
+      "% of households with no internet and with children under 18"
+    ),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      opacity = 1
+    )
+  ) %>% 
+  addLegend(
+    data = soco_internet,
+    pal = pums_pal,
+    values = ~perc_child_nointernet,
+    title = "% households<br>with no internet<br> with children under 18"
+  )
+```
+
+The map shows that there are some differences in internet access within 
+different communities in Sonoma County. There is a 7% difference in the 
+internet access in the "outer" parts of the county. Santa Rosa is the biggest 
+city in the county by population. According to DataUSA, Windsor's average 
+houshold income is $99,792 while Santa Rosa's average household income is 
+$71,374. The difference in income could help explain why there are 7% less 
+households with internet access in Santa Rosa versus areas more north such 
+as Windsor.
+
+Part 3: Analysis of educational mobility in Sonoma County. 
+
+By using 2018 and 2019 educational attainment and mobility data, an analysis
+of educational mobility for Sonoma County can be conducted. 
+
+Useful ACS Codes: 
+
+Code: B07009
+Description:"Geographical mobility in the past year by educational 
+attainment for current residence in the United States"
+What it does: Counts current population in a given year, the combination of 
+people who have remained and people who have immigrated in.
+
+Code: B07409
+Description: "Geographical Mobility in the past year by educational attainment 
+for residence 1 year ago in the United States"
+What it does: Counts people who have remained and people who were here a year 
+ago but have emigrated elsewhere.
+
+
+Counts the population of educational attainment beyond high school in 2019 that 
+includes both people who have remained in Sonoma County and people who have 
+immigrated into Sonoma County: 
+
+```{r}
+soco_edmobility_current_19 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2019,
+    region = "county:097",
+    regionin = "state:06",
+    vars = c("group(B07009)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2019_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable)%>%
+  separate(
+    label,
+    into = c(NA,NA,"mobility","education"),
+    sep = "!!"
+  )%>%
+  mutate(
+    mobility = ifelse(
+      mobility %in% c("Same house 1 year ago:", "Moved within same county:"),
+      "Here last year",
+      "Inflow"
+    )
+  )%>%
+  filter(!is.na(education)) %>%
+  group_by(mobility, education) %>%
+  summarize(estimate = sum(estimate))
+
+soco_edmobility_current_19
+```
+
+Counts the population of educational attainment beyond high school in 2019 that 
+includes both people who have remained in Sonoma COunty and people who have
+emigrated to places out of Sonoma County:
+
+```{r}
+soco_edmobility_lastyear_19 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2019,
+    region = "county:097",
+    regionin = "state:06",
+    vars = c("group(B07409)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2019_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable)%>%
+  separate(
+    label,
+    into = c(NA,NA,"mobility","education"),
+    sep = "!!"
+  )%>%
+  mutate(
+    mobility = ifelse(
+      mobility %in% c("Same house 1 year ago:", "Moved within same county:"),
+      "Outflow",
+      "Here last year"
+    )
+  )%>%
+  filter(!is.na(education)) %>%
+  group_by(mobility, education) %>%
+  summarize(estimate = sum(estimate))
+
+soco_edmobility_lastyear_19
+```
+
+Counts the population of educational attainment in 2018 that includes both
+people who have remained into Sonoma County and people who have immigrated 
+in Sonoma County: 
+
+```{r}
+soco_edmobility_current_18 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2018,
+    region = "county:097",
+    regionin = "state:06",
+    vars = c("group(B07009)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2018_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable)%>%
+  separate(
+    label,
+    into = c(NA,NA,"mobility","education"),
+    sep = "!!"
+  )%>%
+  mutate(
+    mobility = "Here last year"
+  )%>%
+  filter(!is.na(education)) %>%
+  group_by(mobility, education) %>%
+  summarize(estimate = sum(estimate))
+
+soco_edmobility_current_18
+```
+
+Takes the population of educational attainment for 2018 and 2019 to calculate
+the number of people that have immigrated out of Sonoma County and into 
+Sonoma County:
+
+```{r}
+soco_flows_19 <-
+  rbind(
+    soco_edmobility_current_18,
+    soco_edmobility_lastyear_19 %>% 
+      filter(mobility == "Outflow"),
+    soco_edmobility_current_19 %>% 
+      filter(mobility == "Inflow"),
+    soco_edmobility_current_19 %>% 
+      group_by(education) %>% 
+      summarize(estimate = sum(estimate)) %>% 
+      mutate(mobility = "Here this year")
+  ) %>% 
+  pivot_wider(
+    names_from = mobility,
+    values_from = estimate
+  ) %>% 
+  mutate(
+    `External net` = Inflow - Outflow,
+    `Internal net` = `Here this year` - `Here last year` - `External net`,
+  ) %>% 
+  select(
+    `Education level` = education, 
+    `Internal net`,
+    `External net`,
+    `Here last year`, 
+    `Here this year`, 
+    Outflow, 
+    Inflow
+  )
+
+soco_flows_19
+```
+
+The table shows that there are more people with Bachelor's degrees and with high 
+school equivalent degrees moving into the county. For the other groups however,
+the external net is higher meaning that more people are moving out of the county
+for these groups. This could be because Sonoma County's main industry is 
+wine and viticulture where most jobs require high school degrees and Bachelor's
+degrees. 
+
+Sources:
+
+https://datausa.io/profile/geo/santa-rosa-ca/#:~:text=In%202018%
+2C%20Santa%20Rosa%2C%20CA,median%20household%20income%20of%20%2471%2C347
+.&text=The%205%20largest%20ethnic%20groups,%2DHispanic)%20(3.61%25).
+
+https://stanfordfuturebay.github.io/course/introduction.html
+
+https://www.census.gov/programs-surveys/acs/microdata.html
+
+https://api.census.gov
+
+https://api.census.gov/data/2018/acs/acs5
+
+https://api.census.gov/data/2018/acs/acs1
+
+https://api.census.gov/data/2019/acs/acs1
+
