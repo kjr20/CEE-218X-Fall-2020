@@ -1,0 +1,505 @@
+---
+title: "Assignment 6"
+author: "Kimberly Juarez-Rico"
+date: "12/7/2021"
+output: html_document
+---
+
+The purpose of this report is to use Public Use Microdata Survey (PUMS) data to
+conduct a housing burden cost analysis and to use San Francisco open source
+parcel data to determine the amount of unused parcel space within a district
+of San Francisco that could potentially be used as a development space.
+
+Part 1: For part 1 of the analysis I chose to analyze the housing burden costs
+for rented in Sonoma County and how much it would cost to relieve that cost
+from the renters through government programs.
+
+```{r setup, include = F}
+knitr::opts_chunk$set(warning = F, message = F, echo = F, eval = T)
+```
+
+Installed the necessary libraries, Census key, and Mapbox access token:
+
+```{r}
+library(tidyverse)
+library(tigris)
+library(tidycensus)
+library(sf)
+library(leaflet)
+library(mapboxapi)
+library(readxl)
+library(dplyr)
+library(tidyr)
+census_api_key("4f290b276a2a5526b13d917c76884e70b99ba725")
+mb_access_token("pk.eyJ1Ijoia2p1YXJlenJpY28iLCJhIjoiY2tnamx6YXUyMDhlZTMxbDh3cjR2cnJzcSJ9.GfWXcAN9I6phMo8Kg08pFw", overwrite=T, install=T)
+readRenviron("~/.Renviron")
+```
+
+Creates an index of PUMAS data based on geometry centroids for Sonoma County
+and downloads PUMS 5 year ACS data:
+
+```{r}
+soco <- "Sonoma"
+soco_name <-
+  counties("CA", cb = T, progress_bar = F) %>%
+  filter(NAME %in% soco)
+ca_pumas <-
+  pumas("CA", cb = T, progress_bar = F)
+soco_pumas <-
+  ca_pumas %>% 
+  st_centroid() %>% 
+  .[soco_name, ] %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(ca_pumas %>% select(GEOID10)) %>% 
+  st_as_sf()
+pums_vars_2018 <- 
+  pums_variables %>%
+  filter(year == 2018, survey == "acs5")
+```
+
+Filters PUMA data for weighting of income and housing cost for renters and 
+owners as shown by the variables "PUMA", "GRNTP", and "HINCP". 
+(I downloaded more data than required in case I decided to use it in the 
+future.):
+
+```{r}
+ca_pums_housing <- get_pums(
+  variables = c(
+    "PUMA",
+    "GRNTP",
+    "ADJHSG",
+    "SMOCP",
+    "HINCP",
+    "ADJINC",
+    "HISP"
+  ),
+  state = "CA",
+  year = 2018,
+  survey = "acs5"
+)
+saveRDS(ca_pums_housing,"ca_pums_housing")
+soco_pums_housing <-
+  ca_pums_housing %>% 
+  filter(PUMA %in% soco_pumas$PUMACE10)
+```
+
+I decided to keep the burden threshhold to 30% of a person's income because 
+a typical metric for good long term financing is to keep rent and/or other 
+housing payments to 30% of ones income (CNBC) and then filter the income of 
+renters (income), housing cost / income as a metric of housing burden 
+(burden_perc_renters), the number of renters with a burden of 30 
+(burden_30_renters), and income gap that renters need in order to meet only 
+having 30% of their income go to housing costs (income_gap_30_renters):
+
+```{r}
+burden_threshold <- 0.3
+soco_burden <-
+  soco_pums_housing %>% 
+  filter(HINCP > 0) %>%
+  filter(SPORDER == 1) %>% 
+  transmute(
+    puma = PUMA,
+    weight = WGTP,
+    hcost_renters = ifelse(
+      GRNTP > 0,
+      GRNTP*12*as.numeric(ADJHSG),
+      GRNTP == 0
+  ),
+    income = HINCP*as.numeric(ADJINC),
+    burden_perc_renters = hcost_renters/income,
+    burden_30_renters = hcost_renters - burden_threshold*income,
+    incomegap_30_renters = hcost_renters/burden_threshold - income
+  )
+```
+    
+This data set then takes the individual results and coverts them to be analyzed
+on a county wide level:
+
+```{r}
+soco_burden_pumas <-
+  soco_burden %>% 
+  mutate(
+    burdened_30 = ifelse(
+      burden_perc_renters >= burden_threshold,
+      weight,
+      0
+    ),
+    excess_30 = ifelse(
+      burden_30_renters < 0,
+      burden_30_renters,
+      0
+    ),
+    burden_30 = ifelse(
+      burden_30_renters> 0,
+      burden_30_renters,
+      0
+    ),
+    incomegap_30 = ifelse(
+      incomegap_30_renters > 0,
+      incomegap_30_renters,
+      0
+    )
+  ) %>% 
+  group_by(puma) %>% 
+  summarize(
+    burdened_30 = sum(burdened_30),
+    households = sum(weight),
+    burden_30 = sum(burden_30*weight),
+    incomegap_30 = sum(incomegap_30*weight),
+    excess_30 = sum(excess_30*weight)
+  ) %>% 
+  mutate(
+    burdened_30_perc = burdened_30/households
+  ) %>% 
+  left_join(soco_pumas %>% select(puma = PUMACE10)) %>% 
+  st_as_sf()
+sum(soco_burden_pumas$burdened_30)/sum(soco_burden_pumas$households)
+```
+
+This is the total percentage of renters that face housing burden, meaning that
+more than 30% of their income goes to housing costs:
+
+```{r}
+sum(soco_burden_pumas$burden_30)
+```
+
+This map then shows the locations of where people face housing burden by using
+leaflet maps:
+
+```{r}
+burden_pal1 <- colorNumeric(
+  palette = "Purples",
+  domain = soco_burden_pumas$burdened_30_perc
+)
+soco_burden_pumas %>% 
+  leaflet() %>% 
+  addMapboxTiles(
+    style_id = "streets-v11",
+    username = "mapbox"
+  ) %>% 
+  addPolygons(
+    fillColor = ~burden_pal1(burdened_30_perc),
+    fillOpacity = 0.5,
+    color = "white",
+    weight = 0.5,
+    label = ~paste0(round(burdened_30_perc*100), "% of households paying 30%+ 
+                    of income on housing"),
+    highlightOptions = highlightOptions(
+      weight = 2
+    )
+  ) %>% 
+  addLegend(
+    pal = burden_pal1,
+    values = ~burdened_30_perc,
+    title = "% Cost-burdened<br>households"
+  )
+```
+
+Part 2: For part 2, I decided to do an analysis of the parcel availability for
+the Mission District of San Francisco. 
+
+San Francisco makes its parcel data publicly available which is not usually
+true for cities. I tried to find something like the data SF has for Sonoma 
+County, specifically for Santa Rosa, but was unsuccessful. 
+
+SF's open data website (https://data.sfgov.org/api/geospatial/acdm-wktn?method
+=export&format=GeoJSON) as shown allows for access to SF geospatial data that 
+includes parcel shape and zoning data of SF. Zoning data is important because
+SF is divided into "districts" which are a better measurement of parcels. 
+Since parcels are physical locations, it is better to use data provided by
+the city instead of PUMS data that gives more information about people 
+themselves. 
+
+This loads data from open source SF data sets that give the parcel description 
+(business, residence, etc.), the parcel zone, api, and geometry:
+
+```{r}
+sf_parcels_shape <- 
+  st_read("https://data.sfgov.org/api/geospatial/acdm-wktn?method=export&format=GeoJSON") %>% 
+  filter(active == "true") %>% 
+  select(
+    apn = blklot,
+    zoning = zoning_code,
+    zoning_desc = zoning_district
+  )
+```
+
+A temporary download file of parcels divided by district was available through: https://sfassessor.org/sites/default/files/uploaded/2020.7.10_SF_ASR_Secured_Roll_Data_2019-2020.xlsx
+
+```{r}
+temp <- tempfile()
+download.file("https://sfassessor.org/sites/default/files/uploaded/2020.7.10_SF_ASR_Secured_Roll_Data_2019-2020.xlsx",destfile = temp, mode = "wb")
+sf_secured <- read_excel(temp, sheet = "Roll Data 2019-2020")
+datakey <- read_excel(temp, sheet = "Data Key")
+usecode <- read_excel(temp, sheet = "Class Code Only")
+unlink(temp)
+```
+
+From then, a parcel data set is created using the downloaded parcel shapes
+by zoning district:
+
+```{r}
+sf_parcels <-
+  sf_parcels_shape %>% 
+  left_join(
+    sf_secured %>% 
+      mutate(
+        apn = RP1PRCLID %>% 
+          str_replace(" ","")
+      )
+  )
+```
+
+I used the SF open source data website to look up the tract value for the
+Mission District (022803) that can then be matched to the total parcel data
+received from open source San Francisco data.
+
+A mission parcels is then created by matching the locations in tracts that are
+defined to be a part of the "Mission District" and those with the geometries
+in all SF parcels:
+
+```{r}
+mission_dist <-
+  tracts("CA", "San Francisco", cb = T, progress_bar = F) %>% 
+  filter(
+    TRACTCE %in% c(
+      "022803"
+    )
+  ) %>%
+  st_transform(4326)
+mission_parcels <- 
+  sf_parcels %>% 
+  st_centroid() %>% 
+  .[mission_dist, ] %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(sf_parcels %>% select(apn)) %>% 
+  st_as_sf() %>% 
+  filter(!is.na(RP1PRCLID))
+```
+
+This makes sure that parcels are not duplicated in the data which can lead to 
+unrealistic results. Duplicated means that parcels are counted as two types of
+buildings, but they are actually only one building:
+
+```{r}
+duplicate_shapes <- 
+  mission_parcels %>% 
+  as.data.frame() %>% 
+  filter(duplicated(geometry))
+condo_parcels <- 
+  mission_parcels %>% 
+  filter(geometry %in% duplicate_shapes$geometry)
+```
+
+Mission parcels can then be grouped by zone and the type of building that 
+is not duplicated:
+
+```{r}
+mission_parcels %>%
+  st_set_geometry(NULL) %>% 
+  group_by(zoning, zoning_desc) %>% 
+  summarize(Freq = n())
+```
+
+This makes a dataset that can be easily used into the mapping interface. 
+The zoning is mutated so that commercial buildings for the Mission DIstrict are
+separated by their location. From there the sum of units and floor area are 
+calculated. The amount of stories is calculated for each parcel:
+
+```{r}
+mission_parcels_final <-
+  mission_parcels %>% 
+  mutate(
+    zoning = case_when(
+      zoning == "RM-1|RM-2" ~ "RM-2",
+      zoning_desc == "MISSION NEIGHBORHOOD COMMERCIAL" ~ "MISSION",
+      zoning_desc == "MISSION NEIGHBORHOOD COMMERCIAL DISTRICT" ~ "MISSION",
+      TRUE ~ zoning
+    )
+  ) %>% 
+  filter(zoning != "P") %>% 
+  as.data.frame() %>% 
+  mutate(geometry = geometry %>% st_as_text()) %>% 
+  group_by(geometry) %>% 
+  summarize(
+    apn = first(apn),
+    zoning = first(zoning),
+    units = sum(UNITS, na.rm = T),
+    stories = max(STOREYNO, na.rm = T),
+    floorarea = sum(SQFT, na.rm = T)
+  ) %>% 
+  ungroup() %>%
+  select(-geometry) %>% 
+  left_join(mission_parcels %>% select(apn)) %>% 
+  st_as_sf()
+```
+
+This data set is also open source from San Francisco and provides the
+heights of each building directly from the website. A data set named
+mission_heights is created by taking the heights of the stories found in
+mission_parcels_final. 
+
+```{r}
+sf_heights <- st_read("https://data.sfgov.org/resource/h9wh-cg3m.geojson")
+mission_heights <-
+  sf_heights[mission_parcels_final, ]
+```
+
+Finally a data set that can be projected onto a map is developed. The data set
+includes a calculation of the unused floor area, unused units, and unused height
+by calculating the max floor area, the max number of units, and the max stories
+available:
+
+```{r}
+projection <- "+proj=utm +zone=10 +ellps=GRS80 +datum=NAD83 +units=ft +no_defs"
+mission_parcels_zoning <-
+  mission_parcels_final %>% 
+  st_centroid() %>% 
+  st_join(mission_heights %>% select(gen_hght)) %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(mission_parcels_final %>% select(apn)) %>% 
+  st_as_sf() %>% 
+  st_transform(projection) %>% 
+  mutate(
+    lotarea = st_area(.) %>% as.numeric(),
+    max_floorarea = case_when(
+      zoning == "MISSION" ~ lotarea*2.5,
+      zoning %in% c("MISSION","RH-1","RH-2","RH-3","RM-1","RM-2") ~ lotarea*1.8,
+      zoning == "RM-3" ~ lotarea*3.6
+    ),
+    unused_floorarea = ifelse(
+      (max_floorarea - floorarea) > 0,
+      (max_floorarea - floorarea),
+      0
+    ),
+    max_units = case_when(
+      zoning %in% c("MISSION", "MISSION DISTRICT") ~ floor(lotarea/800),
+      zoning == "RH-1" ~ 1,
+      zoning == "RH-2" ~ 2,
+      zoning == "RH-3" ~ 3,
+      zoning == "RM-1" ~ pmax(3, floor(lotarea/800)),
+      zoning == "RM-2" ~ pmax(3, floor(lotarea/600)),
+      zoning == "RM-3" ~ pmax(3, floor(lotarea/400))
+    ),
+    unused_units = ifelse(
+      (max_units - units) > 0,
+      (max_units - units),
+      0
+    ),
+    max_height = ifelse(
+      is.na(gen_hght),
+      40,
+      gen_hght %>% as.numeric()
+    ),
+    max_stories = floor(max_height/11),
+    unused_stories = ifelse(
+      (max_stories - stories) > 0,
+      (max_stories - stories),
+      0
+    )
+  ) %>% 
+  st_transform(4326)
+```
+
+This uses the previous data set to create a map of unused floor area as shown 
+by the increasing intensity of the green color on the map projection:
+
+```{r}
+floorarea_pal <- colorBin(
+  palette = "Greens",
+  bins = c(0,1000,5000,10000,max(mission_parcels_zoning$unused_floorarea, na.rm = T))
+)
+leaflet() %>% 
+  addMapboxTiles(
+    style_id = "light-v9",
+    username = "mapbox"
+  ) %>% 
+  addPolygons(
+    data = mission_parcels_zoning,
+    fillColor = ~floorarea_pal(unused_floorarea),
+    fillOpacity = 0.75,
+    color = "white",
+    weight = 0.5,
+    label = ~round(unused_floorarea)
+  ) %>% 
+  addLegend(
+    data = mission_parcels_zoning,
+    pal = floorarea_pal,
+    values = ~unused_floorarea,
+    title = "Unused Floor Area"
+  )
+```
+
+This creates a map of the unused units as shown by the increasing intensity of 
+the blue color on the map projection:
+
+```{r}
+units_pal <- colorBin(
+  palette = "Blues",
+  bins = c(0,1,5,10,max(mission_parcels_zoning$unused_units, na.rm = T))
+)
+leaflet() %>% 
+  addMapboxTiles(
+    style_id = "light-v9",
+    username = "mapbox"
+  ) %>% 
+  addPolygons(
+    data = mission_parcels_zoning,
+    fillColor = ~units_pal(unused_units),
+    fillOpacity = 0.75,
+    color = "white",
+    weight = 0.5,
+    label = ~round(unused_units)
+  ) %>% 
+  addLegend(
+    data = mission_parcels_zoning,
+    pal = units_pal,
+    values = ~unused_units,
+    title = "Additional Units<br>Allowed"
+  )
+```
+
+This creates a map of the unused stories as shown by the increasing intensity of 
+the red color on the map projection:
+
+```{r}
+stories_plot <- 
+  mission_parcels_zoning %>% 
+  filter(unused_stories > 0) %>% 
+  ggplot() + 
+  geom_sf(
+    aes(
+      fill = unused_stories
+    ),
+    lwd = 0
+  ) + 
+  theme(
+    axis.text.x = element_blank(), 
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank(),
+    rect = element_blank()
+  ) +
+  labs(
+    fill = "Unused Stories"
+  ) +
+  scale_fill_gradient(
+    low = "white",
+    high = "red"
+  )
+stories_plot
+```
+
+The Mission District has the potential to have additional parcels in the tract 
+area of 022803. San Francisco and Silicon Valley are known for their expensive
+housing and for having a large homeless population. Analyzing the availability
+of parcel space can help decision makers create more affordable housing options.
+
+Sources Used: 
+
+https://stanfordfuturebay.github.io/course/introduction.html
+
+https://www2.census.gov/programs-surveys/acs/tech_docs/pums/data_dict/PUMS_Data_Dictionary_2018.pdf
+
+https://data.sfgov.org/api/geospatial/acdm-wktn?method=export&format=GeoJSON
+
+https://www.cnbc.com/2021/07/14/how-much-of-your-income-you-should-spend-on-housing.html#:~:text=The%20most%20common%20rule%20of,like%20heat%2C%20water%20and%20electricity.
