@@ -1,0 +1,684 @@
+---
+title: "Assignment 7"
+author: "Kimberly Juarez-Rico"
+date: "11/25/2020"
+output: html_document
+---
+
+This assignment involves the use of emission data and parcel data. 
+
+The first part of the assignment focused on vechicles emissions in Sebastopol, 
+CA and the second part of the assignment is focused on parcel data emissions
+in Sebastopol, cA.
+
+```{r setup, include = F}
+knitr::opts_chunk$set(warning = F, message = F, echo = T, eval = F)
+```
+
+Loaded necessary libraries and JSON Data:
+
+```{r}
+library(tigris)
+library(tidyverse)
+library(censusapi)
+library(sf)
+library(leaflet)
+library(mapboxapi)
+library(jsonlite)
+
+Sys.setenv(CENSUS_KEY="4f290b276a2a5526b13d917c76884e70b99ba725")
+
+acs_vars_2018_5yr <-
+  listCensusMetadata(
+    name = "2018/acs/acs5",
+    type = "variables"
+  )
+
+june_patterns <- read_csv("neighborhood_patterns.gz")
+```
+
+Loaded CA census block groups and then filtered them to Sebastopol, CA:
+
+```{r}
+ca_cbgs <- block_groups("CA", cb = T, progress_bar = F)
+
+seb_boundary <- places("CA", cb = T, progress_bar = F) %>% 
+  filter(NAME == "Sebastopol")
+
+seb_cbgs <- 
+  ca_cbgs %>% 
+  st_centroid() %>% 
+  .[seb_boundary, ] %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(ca_cbgs %>% select(GEOID)) %>% 
+  st_as_sf()
+```
+
+Filtered Sebastopol commute patterns by using the June commute patterns data:
+
+```{r}
+seb_patterns <-
+  june_patterns %>% 
+  filter(area %in% seb_cbgs$GEOID)
+
+rm(june_patterns)
+```
+
+Creates a data set that filters the devices in Sebastopol:
+
+```{r}
+seb_json <-
+  seb_patterns$device_home_areas[1] %>% 
+  fromJSON() %>%
+  unlist() %>% 
+  as.data.frame() %>% 
+  rownames_to_column() %>% 
+  rename(
+    origin_cbg = "rowname",
+    device_count = "."
+  )
+
+head(seb_json)
+```
+
+Counts the devices that have an origin in Sebastopol;
+```{r}
+seb_origin_cbgs <-
+  1:nrow(seb_patterns) %>% 
+  map_dfr(function(row){
+    seb_json <-
+      seb_patterns$device_home_areas[row] %>% 
+      fromJSON() %>%
+      unlist() %>% 
+      as.data.frame() %>% 
+      rownames_to_column() %>% 
+      rename(
+        seb_origin_cbg = "rowname",
+        device_count = "."
+      ) %>% 
+      mutate(
+        device_count = ifelse(
+          device_count == 4,
+          3,
+          device_count
+        )
+      )
+    
+  })
+```
+
+Counts the total number of devices:
+```{r}
+seb_origin_cbgs_merged <-
+  seb_origin_cbgs %>% 
+  group_by(seb_origin_cbg) %>% 
+  summarize(
+    device_count = max(device_count)
+  )
+```
+
+Reads the home_panel_summary:
+```{r}
+seb_home_panel_summary <- read_csv("home_panel_summary.gz")
+```
+
+Filters CA census block groups:
+
+```{r}
+ca_cbgs_pop <-
+  counties("CA", cb = T, progress_bar = F) %>%
+  pull(COUNTYFP) %>% 
+  map_dfr(function(x){
+    getCensus(
+      name = "acs/acs5",
+      vintage = 2018,
+      region = "block group:*",
+      regionin = paste0("state:06+county:", x),
+      vars = "B01001_001E"
+    )
+  }) %>% 
+  transmute(
+    census_block_group =
+      paste0(state,county,tract,block_group),
+    pop = B01001_001E
+  )
+```
+
+Filters census block group data for Sebastopol:
+
+```{r}
+seb_origin_cbgs_pop <-
+  seb_origin_cbgs_merged %>% 
+  left_join(
+    ca_cbgs_pop,
+    by = c("seb_origin_cbg" = "census_block_group")
+  )
+
+sum(is.na(seb_origin_cbgs_pop$pop))
+```
+
+Counts the number of devices residing in Sebastopol:
+
+```{r}
+seb_origin_cbgs_normalized <-
+  seb_origin_cbgs_pop %>% 
+  filter(!is.na(pop)) %>% 
+  left_join(
+    seb_home_panel_summary %>% 
+      select(seb_origin_cbg = census_block_group, number_devices_residing)
+  ) %>% 
+  mutate(
+    visits = (device_count * pop / number_devices_residing) %>% round()
+  ) %>% 
+  left_join(ca_cbgs %>% select(seb_origin_cbg = GEOID)) %>% 
+  st_as_sf()
+```
+
+Creates a map of the routes to Sebastopol by using devices:
+
+```{r}
+visits_pal <- colorNumeric(
+  palette = "Reds",
+  domain = seb_origin_cbgs_normalized %>% 
+    arrange(desc(visits)) %>% 
+    pull(visits) %>% 
+    .[-c(1:6)]
+)
+
+leaflet() %>% 
+  addMapboxTiles(
+    style_id = "light-v9",
+    username = "mapbox"
+  ) %>% 
+  addPolygons(
+    data = seb_cbgs,
+    fill = F
+  ) %>% 
+  addPolygons(
+    data = seb_origin_cbgs_normalized,
+    fillColor = ~visits_pal(visits),
+    color = "red",
+    weight = 1,
+    fillOpacity = 0.75,
+    label = ~visits
+  )
+```
+
+Creates the origin and destination points of trips to Sebastopol:
+
+```{r}
+seb_origin <-
+  seb_origin_cbgs_normalized %>% 
+  st_centroid() %>% 
+  st_coordinates()
+
+seb_destination <-
+  seb_boundary %>% 
+  st_centroid() %>% 
+  st_coordinates()
+
+seb_route <- 
+  1:nrow(seb_origin) %>%
+  map_dfr(function(x){
+    mb_directions(
+      origin = seb_origin[x, ],
+      destination = seb_destination,
+      profile = "driving-traffic"
+    )
+  }) %>% 
+  st_as_sf()
+```
+
+Creates a map of routes to Sebastopol:
+
+```{r}
+leaflet() %>%
+  addMapboxTiles(
+    style_id = "light-v9",
+    username = "mapbox"
+  ) %>%
+  addPolylines(
+    data = seb_route
+  )
+```
+
+Creates a data set of Sebastopol travel times by using ACS 5 year data for 
+the duration of trips to Sebastopol. The duration of trips will then determine
+the emissions produced:
+
+```{r}
+seb_travel_time_mode <-
+  counties("CA", cb = T, progress_bar = F) %>%
+  pull(COUNTYFP) %>% 
+  map_dfr(function(x){
+    getCensus(
+      name = "acs/acs5",
+      vintage = 2018,
+      region = "block group:*",
+      regionin = paste0("state:06+county:", x),
+      vars = "group(B08134)"
+    )
+  }) %>% 
+  mutate(
+    cbg =
+      paste0(state,county,tract,block_group)
+  ) %>%
+  filter(cbg %in% seb_origin_cbgs_normalized$seb_origin_cbg) %>% 
+  select(!c(GEO_ID,state,county,tract,block_group,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2018_5yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA, NA, "total", "mode", "carpool", "time"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    mode = case_when(
+      total %in% c(
+        "Less than 10 minutes",
+        "10 to 14 minutes",
+        "15 to 19 minutes",
+        "20 to 24 minutes",
+        "25 to 29 minutes",
+        "30 to 34 minutes",
+        "35 to 44 minutes",
+        "45 to 59 minutes",
+        "60 or more minutes"
+      ) ~ "Total",
+      mode == "Drove alone" ~ mode,
+      carpool %in% c(
+        "In 2-person carpool",
+        "In 3-or-more-person carpool"
+      ) ~ carpool
+    ),
+    time = case_when(
+      mode == "Total" ~ total,
+      mode == "Drove alone" ~ carpool,
+      mode == carpool ~ time
+    )
+  ) %>% 
+  filter(!is.na(time)) %>% 
+  select(-total, -carpool) %>% 
+  pivot_wider(
+    names_from = mode,
+    values_from = estimate
+  ) %>% 
+  mutate(
+    perc_veh1 = `Drove alone`/Total,
+    perc_veh2 = `In 2-person carpool`/Total,
+    perc_veh3 = `In 3-or-more-person carpool`/Total
+  )
+```
+
+The number of trips are then combined with the origin and destination data
+provided by the Sebastopol commute patterns:
+
+```{r}
+seb_trips <-
+  seb_origin_cbgs_normalized %>% 
+  cbind(
+    seb_route %>% 
+      st_set_geometry(NULL)
+  ) %>% 
+  mutate(
+    time = case_when(
+      duration < 10 ~ "Less than 10 minutes",
+      duration < 15 ~ "10 to 14 minutes",
+      duration < 20 ~ "15 to 19 minutes",
+      duration < 25 ~ "20 to 24 minutes",
+      duration < 30 ~ "25 to 29 minutes",
+      duration < 35 ~ "30 to 34 minutes",
+      duration < 45 ~ "35 to 44 minutes",
+      duration < 60 ~ "45 to 59 minutes",
+      TRUE ~ "60 or more minutes"
+    )
+  ) %>% 
+  left_join(
+    seb_travel_time_mode %>% 
+      select(
+        seb_origin_cbg = cbg,
+        time,
+        perc_veh1,
+        perc_veh2,
+        perc_veh3
+      ),
+    by = c("seb_origin_cbg", "time")
+  ) %>% 
+  mutate(
+    vehicles = 
+      visits * perc_veh1 + 
+      visits * perc_veh2 / 2 +
+      visits * perc_veh3 / 3,
+    vmt = vehicles * distance * 2
+  )
+```
+
+Sums the total number of trips by counting the number of devices:
+
+```{r}
+recorded_visits <- sum(seb_trips$device_count)/
+  sum(seb_patterns$raw_device_counts)
+
+recorded_visits
+```
+
+Outputs the total vehicle miles traveled by the number of trips:
+
+```{r}
+sum(seb_trips$vmt, na.rm = T)/recorded_visits
+```
+
+Executes 2017 vehicle EMFAC data:
+
+```{r}
+emfac <- 
+  read_csv("EMFAC2017-EI-2011Class-BayAreaAQMD-2020-Summer-20201125144541.csv", 
+           skip = 8) %>% 
+  transmute(
+    Category = `Vehicle Category`,
+    Fuel_Type = Fuel,
+    Percent_Trips = Trips/sum(Trips),
+    Percent_Miles = VMT/sum(VMT),
+    `gCO2_Running_Exhaust` = CO2_RUNEX,
+    `gCO2_Start_Exhaust` = CO2_STREX
+  )
+
+emfac
+```
+
+Calculates the emissions given by commuters to Sebastopol, CA:
+
+```{r}
+seb_trips_ghg <-
+  emfac %>% 
+  mutate(
+    trips = Percent_Trips * sum(seb_trips$visits, na.rm = T),
+    vmt = Percent_Miles * sum(seb_trips$vmt, na.rm = T),
+    ghg = vmt*gCO2_Running_Exhaust + trips*gCO2_Start_Exhaust*2
+  )
+
+sum(seb_trips_ghg$ghg)*1e-6/recorded_visits
+```
+
+
+Part 2: Building Emissions, ZIPCODE 95472 for Sebastopol
+
+The second part of the assignment focused on calculating emissions based on the 
+energy use by parcel for Sebastopol, CA. 
+
+Inputs PG&E data for the summer of 2020:
+
+```{r}
+pge_data <- 
+  2020 %>% 
+  map_dfr(function(yr){
+    
+    factor <- 
+      pge_elec_emissions_factor %>% 
+      filter(year == yr) %>% 
+      pull(factor)
+    
+    1:2 %>% 
+      map_dfr(function(quarter){
+        
+        c("Electric","Gas") %>% 
+          map_dfr(function(type){
+            
+            filename <- 
+              paste0(
+                "PGE_",
+                yr,
+                "_Q",
+                quarter,
+                "_",
+                type,
+                "UsageByZip.csv"
+              )
+            
+            temp <- read_csv(filename)
+            
+            temp <-
+              temp %>% 
+              rename_all(toupper) %>% 
+              mutate(
+                TOTALKBTU = ifelse(
+                  substr(CUSTOMERCLASS,1,1) == "E",
+                  TOTALKWH * 3.412,
+                  TOTALTHM * 99.976
+                ),
+                TOTALTCO2E = ifelse(
+                  substr(CUSTOMERCLASS,1,1) == "E",
+                  TOTALKWH/1000 * factor * 0.000453592,
+                  TOTALTHM * 0.00531
+                )
+              ) %>% 
+              select(
+                ZIPCODE,
+                YEAR,
+                MONTH,
+                CUSTOMERCLASS,
+                TOTALKBTU,
+                TOTALTCO2E,
+                TOTALCUSTOMERS
+              )
+            
+          })
+        
+      })
+    
+  })
+```
+
+Filters ZCTAS data for the US, then Sonoma County, and then Sebastopol:
+
+```{r}
+us_zips <- 
+  zctas(cb = T, progress_bar = F)
+
+sonoma_zips <- 
+  us_zips %>% 
+  st_centroid() %>% 
+  .[counties("CA", cb = T, progress_bar = F) %>% filter(NAME == "Sonoma"), ] %>% 
+  st_set_geometry(NULL) %>% 
+  left_join(us_zips %>% select(GEOID10)) %>% 
+  st_as_sf()
+
+seb_zips<-
+  sonoma_zips %>%
+  filter(ZCTA5CE10 == 95472)
+```
+
+Filters Sebastopol PG&E data from the total PG&E data set to electric and gas
+residential use and commercial and gas residential use:
+
+```{r}
+seb_pge_data <-
+  pge_data %>% 
+  filter(ZIPCODE %in% seb_zips$ZCTA5CE10) %>% 
+  filter(CUSTOMERCLASS %in% c(
+    "Elec- Commercial",
+    "Elec- Residential",
+    "Gas- Commercial",
+    "Gas- Residential"
+  )) %>% 
+  mutate(
+    UseCodType = substr(CUSTOMERCLASS,0,20)
+  ) %>%
+  group_by(ZIPCODE, UseCodType, MONTH, YEAR) %>% 
+  summarize(
+    TOTALKBTU = sum(TOTALKBTU, na.rm=T),
+    TOTALTCO2E = sum(TOTALTCO2E, na.rm=T), 
+    TOTALCUSTOMERS = mean(TOTALCUSTOMERS, na.rm=T)
+  ) %>% 
+  group_by(ZIPCODE,UseCodType, MONTH) %>%
+  summarize_at(
+    vars(TOTALKBTU,TOTALTCO2E,TOTALCUSTOMERS),
+    sum,
+    na.rm=T
+  )
+```
+
+Filters energy data for just the month of June 2020:
+
+```{r}
+seb_june_2020 <-
+  seb_pge_data %>%
+  filter(MONTH == 6)
+```
+
+Summarizes energy use by KBTUs and CO2E emissions:
+
+```{r}
+seb_pge_june_2020 <-
+  seb_june_2020%>%
+group_by(UseCodType,TOTALKBTU, TOTALTCO2E)%>%
+ summarize(
+  TOTALKBTU = sum(TOTALKBTU, na.rm = T),
+  TOTALTCO2E = sum(TOTALTCO2E, na.rm = T)
+  )
+```
+
+Creates a map of June 2020 energy use in Sebastopol:
+
+```{r}
+ggplot(
+  seb_june_2020, 
+  aes(
+    x = as.factor(MONTH), 
+    y = TOTALKBTU/1000000
+  )
+) + 
+  geom_bar(stat = "identity", aes(fill = ENERGYTYPE), position = "dodge") + 
+  labs(x = "Month", y = "GBTU", title = "Sebastopol Energy Usage, June 2020") + 
+  scale_fill_discrete(name="Energy Type",labels = c("Electricity","Gas"))
+```
+
+Creates a map of June 2020 emissions in Sebastopol:
+
+```{r}
+ggplot(
+  seb_june_2020, 
+  aes(
+    x = as.factor(MONTH), 
+    y = TOTALTCO2E
+  )
+) + 
+  geom_bar(stat = "identity", aes(fill = ENERGYTYPE), position = "dodge") + 
+  labs(x = "Month", y = "tCO2e", title = "Sebastopol Emissions, June 2020") + 
+  scale_fill_discrete(name="Energy Type",labels = c("Electricity","Gas"))
+```
+
+
+I was able to find parcel data for Sonoma County by using the County of
+Sonoma website that has open source parcel data for direct download.
+This is probably due to the fact that the area is prone to wildfires so openly 
+available parcel data may be requested often. 
+
+Bring in parcel data:
+```{r}
+soco_parcel_data <- read_csv("Sonoma_County_Parcels.csv")
+```
+
+Filter to just Sebastopol by city name, building type, and 95472 zip code:
+```{r}
+seb_parcel_filter <-
+  soco_parcel_data%>%
+  select(
+    OBJECTID, UseCodType,TRADesc, LndSizAcre, LndSizSqft, MailCtySta, MailZip5,
+    SitusFrm1
+  )%>%
+  filter(
+    TRADesc %in% c("Sebastopol"),
+    
+    UseCodType %in%
+      c(
+        "Residential",
+        "Commercial"),
+    
+    MailZip5 %in% c("95472")
+  )%>%
+```
+
+Filters the parcel data to square feet:
+
+```{r}
+seb_parcel_final <-
+seb_parcel_filter%>%
+summarize(
+  TotalSqFt = sum(LndSizSqft, na.rm = T))
+```
+
+Total commercial electricity use per parcel square feet in Sebastopol for the 
+month of June 2020:
+
+```{r}
+elec_com_use_per_sqft = seb_pge_june_2020[1,2] / seb_parcel_final[1,2]
+```
+
+Total commercial emissions per parcel square feet in Sebastopol for the month 
+of June 2020:
+
+```{r}
+elec_com_emissions_per_sqft = seb_pge_june_2020[1,3] / seb_parcel_final[1,2]
+```
+
+Total residential electricity use per parcel square feet in Sebastopol for the 
+month of June 2020:
+
+```{r}
+elec_res_use_per_sqft = seb_pge_june_2020[2,2] / seb_parcel_final[2,2]
+```
+
+Total residential electricity emissions per parcel square feet in Sebastopol for 
+the month of June 2020:
+
+```{r}
+elec_res_emissions_per_sqft = seb_pge_june_2020[2,3] / seb_parcel_final[2,2]
+```
+
+Total commercial gas use per parcel square feet in Sebastopol for the month of 
+June 2020:
+
+```{r}
+gas_com_use_per_sqft = seb_pge_june_2020[3,2] / seb_parcel_final[1,2]
+```
+
+Total gas emissions per parcel square feet in Sebastopol for the month of 
+June 2020: 
+
+```{r}
+gas_com_emissions_per_sqft = seb_pge_june_2020[3,3] / seb_parcel_final[1,2]
+```
+
+Total residential gas use per parcel square feet in Sebastopol for the month of 
+June 2020:
+
+```{r}
+gas_elec_use_per_sqft = seb_pge_june_2020[4,2] / seb_parcel_final[2,2]
+```
+
+Total residential gas emissions per parcel square feet in Sebastopol for the 
+month of June 2020:
+
+```{r}
+gas_elec_emissions_per_sqft = seb_pge_june_2020[4,3] / seb_parcel_final[2,2]
+```
+
+Sources Used:
+
+https://stanfordfuturebay.github.io/course/introduction.html
+
+https://sonomacounty.ca.gov/PRMD/Administration/GIS/Geographical-Information-Systems/
+
+
+
+
