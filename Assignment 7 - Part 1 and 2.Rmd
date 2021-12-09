@@ -399,13 +399,12 @@ Part 2: Building Emissions, ZIPCODE 95472 for Sebastopol
 The second part of the assignment focused on calculating emissions based on the 
 energy use by parcel for Sebastopol, CA in Sonoma County. I found open data
 from the Sonoma County site that divides parcels into residential and commercial
-parcel catergories. I used 2020 data that assumes an emission factor of 210 
-(PGE). I used 2020 data to match SafeGraph data used in part 1.
+parcel catergories. I used 2020 data that assumes an electricity emission factor 
+of 206 (PGE). I used June 2020 data to match SafeGraph data used in part 1.
 
 Inputs PG&E data for the year 2020:
 
 ```{r}
-
 pge_data <- 
   2020 %>% 
   map_dfr(function(yr){
@@ -510,10 +509,10 @@ seb_pge_data <-
   )
 ```
 
-Filters energy data for just the month of June 2017:
+Filters energy data for just the month of June 2020:
 
 ```{r}
-seb_june_2017 <-
+seb_june_2020 <-
   seb_pge_data %>%
   filter(MONTH == 6)
 ```
@@ -521,8 +520,8 @@ seb_june_2017 <-
 Summarizes energy use by KBTUs and CO2E emissions:
 
 ```{r}
-seb_pge_june_2017 <-
-  seb_june_2017%>%
+seb_pge_june_2020 <-
+  seb_june_2020%>%
 group_by(UseCodType,TOTALKBTU, TOTALTCO2E)%>%
  summarize(
   TOTALKBTU = sum(TOTALKBTU, na.rm = T),
@@ -530,36 +529,36 @@ group_by(UseCodType,TOTALKBTU, TOTALTCO2E)%>%
   )
 ```
 
-Creates a map of June 2017 energy use in Sebastopol:
+Creates a map of June 2020 energy use in Sebastopol:
 
 ```{r}
 ggplot(
-  seb_june_2017, 
+  seb_june_2020, 
   aes(
     x = as.factor(MONTH), 
     y = TOTALKBTU/1000000
   )
 ) + 
   geom_bar(stat = "identity", aes(fill = UseCodType), position = "dodge") + 
-  labs(x = "Month", y = "GBTU", title = "Sebastopol Energy Usage, June 2017") + 
+  labs(x = "Month", y = "GBTU", title = "Sebastopol Energy Usage, June 2020") + 
   scale_fill_discrete(name="Energy Type",labels = c("Elec-Commercial",
                                                     "Elec-Residential",
                                                     "Gas-Commercial",
                                                     "Gas-Residential"))
 ```
 
-Creates a map of June 2017 emissions in Sebastopol:
+Creates a map of June 2020 emissions in Sebastopol:
 
 ```{r}
 ggplot(
-  seb_june_2017, 
+  seb_june_2020, 
   aes(
     x = as.factor(MONTH), 
     y = TOTALTCO2E
   )
 ) + 
   geom_bar(stat = "identity", aes(fill = UseCodType), position = "dodge") + 
-  labs(x = "Month", y = "tCO2e", title = "Sebastopol Emissions, June 2017") + 
+  labs(x = "Month", y = "tCO2e", title = "Sebastopol Emissions, June 2020") + 
   scale_fill_discrete(name="Energy Type",labels = c("Elec-Commercial",
                                                     "Elec-Residential",
                                                     "Gas-Commercial",
@@ -578,6 +577,8 @@ Bring in parcel data:
 
 ```{r}
 soco_parcel_data <- read_csv("Sonoma_County_Parcels.csv")
+
+soco_parcel_data
 ```
 
 Filter to just Sebastopol by city name, building type, and 95472 zip code:
@@ -599,6 +600,8 @@ seb_parcel_filter <-
     
     MailZip5 %in% c("95472")
   )
+
+seb_parcel_filter
 ```
 
 Filters the parcels to only residential building area:
@@ -614,6 +617,8 @@ seb_parcels_res <-
     
     MailZip5 %in% c("95472")
   )
+
+seb_parcels_res
 ```
 
 Filters the parcels to only commercial building area:
@@ -629,6 +634,8 @@ seb_parcels_com <-
     
     MailZip5 %in% c("95472")
   )
+
+seb_parcels_com
 ```
 
 Filters the total residential parcel data to square feet:
@@ -650,92 +657,85 @@ summarize(
 ```
 
 Total commercial electricity use per parcel square feet in Sebastopol for the 
-month of June 2017:
+month of June 2020:
 
 ```{r}
-elec_com_use_per_sqft = seb_pge_june_2017[1,2] / seb_parcel_final_com[1,1]
+elec_com_use_per_sqft = seb_pge_june_2020[1,2] / seb_parcel_final_com[1,1]
 ```
 
 Total commercial emissions per parcel square feet in Sebastopol for the month 
-of June 2017:
+of June 2020:
 
 ```{r}
-elec_com_emissions_per_sqft = seb_pge_june_2017[1,3] / seb_parcel_final_com[1,1]
+elec_com_emissions_per_sqft = seb_pge_june_2020[1,3] / seb_parcel_final_com[1,1]
 ```
 
 Total residential electricity use per parcel square feet in Sebastopol for the 
-month of June 2017:
+month of June 2020:
 
 ```{r}
-elec_res_use_per_sqft = seb_pge_june_2017[2,2] / seb_parcel_final_res[1,1]
+elec_res_use_per_sqft = seb_pge_june_2020[2,2] / seb_parcel_final_res[1,1]
 ```
 
 Total residential electricity emissions per parcel square feet in Sebastopol for 
-the month of June 2017:
+the month of June 2020:
 
 ```{r}
-elec_res_emissions_per_sqft = seb_pge_june_2017[2,3] / seb_parcel_final_res[1,1]
+elec_res_emissions_per_sqft = seb_pge_june_2020[2,3] / seb_parcel_final_res[1,1]
 ```
 
 Total commercial gas use per parcel square feet in Sebastopol for the month of 
 June 2017:
 
 ```{r}
-gas_com_use_per_sqft = seb_pge_june_2017[3,2] / seb_parcel_final_com[1,1]
+gas_com_use_per_sqft = seb_pge_june_2020[3,2] / seb_parcel_final_com[1,1]
 ```
 
 Total commercial gas emissions per parcel square feet in Sebastopol for the 
-month of June 2017: 
+month of June 2020: 
 
 ```{r}
-gas_com_emissions_per_sqft = seb_pge_june_2017[3,3] / seb_parcel_final_com[1,1]
+gas_com_emissions_per_sqft = seb_pge_june_2020[3,3] / seb_parcel_final_com[1,1]
 ```
 
 Total residential gas use per parcel square feet in Sebastopol for the month of 
-June 2017:
+June 2020:
 
 ```{r}
-gas_res_use_per_sqft = seb_pge_june_2017[4,2] / seb_parcel_final_res[1,1]
+gas_res_use_per_sqft = seb_pge_june_2020[4,2] / seb_parcel_final_res[1,1]
 ```
 
 Total residential gas emissions per parcel square feet in Sebastopol for the 
-month of June 2017:
+month of June 2020:
 
 ```{r}
-gas_res_emissions_per_sqft = seb_pge_june_2017[4,3] / seb_parcel_final_res[1,1]
+gas_res_emissions_per_sqft = seb_pge_june_2020[4,3] / seb_parcel_final_res[1,1]
 ```
 
 The total commercial electricity use in Sebastopol per parcel square foot for 
-the month of June 2017 is 0.67991 kBTU. 
+the month of June 2020 is 6.596244 kBTU. 
 The total commercial electricity emissions in Sebastopol per parcel square 
-foot for the month of June 2017 is 0.0001806427 tCO2E. 
+foot for the month of June 2020 is 0.0001806427 tCO2E. 
 
 The total residential electricity use in Sebastopol per parcel square foot for 
-the month of June 2017 is 0.8678829 kBTU. 
+the month of June 2020 is 0.8678829 kBTU. 
 The total residential electricity emissions in Sebastopol per parcel square 
-foot for the month of June 2017 is 1.834282e-05 tCO2E.
+foot for the month of June 2020 is 2.376757e-05 tCO2E.
 
 The total commercial gas use in Sebastopol per parcel square foot for 
-the month of June 2017 is 0 kBTU. 
+the month of June 2020 is 0 kBTU. 
 The total commercial gas emissions in Sebastopol per parcel square 
-foot for the month of June 2017 is 0 tCO2E.
+foot for the month of June 2020 is 0 tCO2E.
 
 The total residential gas use in Sebastopol per parcel square foot for 
-the month of June 2017 is 0.4054395 kBTU. 
+the month of June 2020 is 0.6395403 kBTU. 
 The total residential gas emissions in Sebastopol per parcel square 
-foot for the month of June 2017 is 2.153401e-05 tCO2E.
+foot for the month of June 2020 is 3.396774e-05 tCO2E.
 
 
 Sources Used:
 
-https://docs.safegraph.com/docs/home-panel-summary
-
-https://docs.safegraph.com/docs/neighborhood-patterns
-
 https://stanfordfuturebay.github.io/course/introduction.html
 
 https://sonomacounty.ca.gov/PRMD/Administration/GIS/Geographical-Information-Systems/
-
-
-
 
